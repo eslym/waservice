@@ -5,11 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
@@ -39,7 +41,8 @@ func main() {
 
 	flag.Parse()
 
-	dbLog := waLog.Stdout("Database", "DEBUG", true)
+	dbLog := waLog.Stdout("Database", "INFO", true)
+
 	// Make sure you add appropriate DB connector imports, e.g. github.com/mattn/go-sqlite3 for SQLite
 	container, err := sqlstore.New("sqlite", fmt.Sprintf("file:%s?_pragma=foreign_keys(1)", dbPath), dbLog)
 	if err != nil {
@@ -52,7 +55,6 @@ func main() {
 	}
 	clientLog := waLog.Stdout("Client", "INFO", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
-	client.EnableAutoReconnect = true
 
 	server := &http.Server{
 		Addr: httpServe,
@@ -62,26 +64,48 @@ func main() {
 
 	go startHttpServer(server, client, onClose)
 
-	qrChan, _ := client.GetQRChannel(context.Background())
+	var handler func(evt interface{})
+	handler = func(evt interface{}) {
+		switch v := evt.(type) {
+		case *events.StreamError:
+			_ = server.Close()
+		case *events.QR:
+			readyState.lock.Lock()
+			readyState.qrCode = v.Codes[0]
+			readyState.lock.Unlock()
+		case *events.PairSuccess:
+			readyState.lock.Lock()
+			readyState.ready = true
+			readyState.lock.Unlock()
+		case *events.LoggedOut:
+			readyState.lock.Lock()
+			readyState.ready = false
+			readyState.qrCode = ""
+			readyState.lock.Unlock()
+			go func() {
+				time.Sleep(5 * time.Second)
+				client = whatsmeow.NewClient(deviceStore, clientLog)
+				client.AddEventHandler(handler)
+				err = client.Connect()
+				if err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "Error reconnecting: %s\n", err)
+					_ = server.Shutdown(context.Background())
+				}
+			}()
+		}
+	}
+
+	client.AddEventHandler(handler)
+
 	err = client.Connect()
 	if err != nil {
 		panic(err)
 	}
-	for evt := range qrChan {
-		if evt.Event == "code" {
-			// Render the QR code here
-			// e.g. qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			// or just manually `echo 2@... | qrencode -t ansiutf8` in a terminal
-			fmt.Println("QR code:", evt.Code)
-			readyState.lock.Lock()
-			readyState.qrCode = evt.Code
-			readyState.lock.Unlock()
-		} else if evt.Event == "success" {
-			fmt.Println("Login event:", evt.Event)
-			readyState.lock.Lock()
-			readyState.ready = true
-			readyState.lock.Unlock()
-		}
+
+	if client.Store.ID != nil {
+		readyState.lock.Lock()
+		readyState.ready = true
+		readyState.lock.Unlock()
 	}
 
 	// Listen to Ctrl+C (you can also do something else that prevents the program from exiting)
@@ -95,6 +119,8 @@ func main() {
 
 	client.Disconnect()
 	_ = server.Shutdown(context.Background())
+
+	time.Sleep(1 * time.Second)
 }
 
 func startHttpServer(server *http.Server, wa *whatsmeow.Client, onClose chan<- bool) {
@@ -170,6 +196,7 @@ func startHttpServer(server *http.Server, wa *whatsmeow.Client, onClose chan<- b
 		if ready {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte("already logged in"))
+			return
 		}
 		if qrCode == "" {
 			w.WriteHeader(http.StatusServiceUnavailable)
