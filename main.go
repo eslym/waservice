@@ -78,7 +78,7 @@ func main() {
 				readyState.lock.Lock()
 				readyState.qrCode = evt.Code
 				readyState.lock.Unlock()
-			} else {
+			} else if evt.Event == "success" {
 				fmt.Println("Login event:", evt.Event)
 				readyState.lock.Lock()
 				readyState.ready = true
