@@ -62,38 +62,26 @@ func main() {
 
 	go startHttpServer(server, client, onClose)
 
-	if client.Store.ID == nil {
-		// No ID stored, new login
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			panic(err)
+	qrChan, _ := client.GetQRChannel(context.Background())
+	err = client.Connect()
+	if err != nil {
+		panic(err)
+	}
+	for evt := range qrChan {
+		if evt.Event == "code" {
+			// Render the QR code here
+			// e.g. qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+			// or just manually `echo 2@... | qrencode -t ansiutf8` in a terminal
+			fmt.Println("QR code:", evt.Code)
+			readyState.lock.Lock()
+			readyState.qrCode = evt.Code
+			readyState.lock.Unlock()
+		} else if evt.Event == "success" {
+			fmt.Println("Login event:", evt.Event)
+			readyState.lock.Lock()
+			readyState.ready = true
+			readyState.lock.Unlock()
 		}
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				// Render the QR code here
-				// e.g. qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				// or just manually `echo 2@... | qrencode -t ansiutf8` in a terminal
-				fmt.Println("QR code:", evt.Code)
-				readyState.lock.Lock()
-				readyState.qrCode = evt.Code
-				readyState.lock.Unlock()
-			} else if evt.Event == "success" {
-				fmt.Println("Login event:", evt.Event)
-				readyState.lock.Lock()
-				readyState.ready = true
-				readyState.lock.Unlock()
-			}
-		}
-	} else {
-		// Already logged in, just connect
-		err = client.Connect()
-		if err != nil {
-			panic(err)
-		}
-		readyState.lock.Lock()
-		readyState.ready = true
-		readyState.lock.Unlock()
 	}
 
 	// Listen to Ctrl+C (you can also do something else that prevents the program from exiting)
